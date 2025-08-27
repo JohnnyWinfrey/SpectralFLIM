@@ -8,13 +8,13 @@ from typing import Dict, Union
 
 class NewportUSB:
     """
-    Python wrapper for Newport MS260i using Cornerstone.dll via USB.
+    Python wrapper for Newport Cornerstone Devices using Cornerstone.dll via USB.
     """
 
     def __init__(self):
         self._mono = CornerstoneDll.Cornerstone(True)
         if not self._mono.connect():
-            raise IOError("❌ Could not connect to MS260i over USB")
+            raise IOError("❌ Could not connect over USB")
 
     def __del__(self):
         try:

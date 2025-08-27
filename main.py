@@ -65,10 +65,10 @@ def run(command, *args):
             startupinfo=startupinfo
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"MS260i command '{command}' timed out.")
+        raise RuntimeError(f"Spectrograph command '{command}' timed out.")
 
     if result.returncode != 0:
-        raise RuntimeError(f"Error running MS260i: {result.stderr.strip()}")
+        raise RuntimeError(f"Error running Spectrograph Class: {result.stderr.strip()}")
 
     output = result.stdout.strip()
     print(output)  # Safe in dev, suppressed in packaged GUI
@@ -555,7 +555,7 @@ class FlimFrame(ttk.Frame):
 # =========================
 
 root = tk.Tk()
-root.title("HyperSpectral")
+root.title("Let There Be Beans")
 root.geometry("1200x700")
 root.resizable(True, True)
 
