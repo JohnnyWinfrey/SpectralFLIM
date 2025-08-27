@@ -1,0 +1,4 @@
+# requirements_313_32.txt
+# Needs 'clr' -> provided by pythonnet.
+# 'time' is stdlib; CornerstoneDll is your vendor .NET assembly (not pip-installed).
+pythonnet>=3.0.5,<3.14

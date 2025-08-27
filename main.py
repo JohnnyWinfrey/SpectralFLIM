@@ -37,8 +37,8 @@ scan_stopped = False
 # --- Backend subprocess call for spectrograph (unchanged) ---
 def run(command, *args):
     cmd = [
-        r"C:/Users/Nanophotonics/AppData/Local/Programs/Python/Python310-32/python.exe",
-        "C:/Users/Nanophotonics/Desktop/HyperSpectral/controller/spectrograph_command.py",
+        r".venv313-32\Scripts\python.exe",
+        "controller\spectrograph_command.py",
         command
     ] + list(map(str, args))
 
