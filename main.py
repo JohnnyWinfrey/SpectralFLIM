@@ -1,3 +1,4 @@
+# main.py
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import subprocess
@@ -5,6 +6,7 @@ import json
 import DataMeasurer as dm
 import numpy as np
 import os
+import base64
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
@@ -15,6 +17,12 @@ import io
 import sys
 import queue
 
+# =========================
+# Hardcoded helper paths (EDIT THESE)
+# =========================
+TH260_HELPER_PATH = r"helpers\th260_helper.exe"
+STAGE_HELPER_PATH = r"helpers\stage_helper.exe"
+
 # --- Detect if we are in a PyInstaller-built executable ---
 IS_FROZEN = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
 if IS_FROZEN:
@@ -23,7 +31,7 @@ if IS_FROZEN:
     sys.stderr = open(os.devnull, 'w')
 
 # =========================
-# Shared: Spectrograph only
+# Spectrograph backend (existing)
 # =========================
 
 # --- Globals for plotting and scan control (spectrograph mode) ---
@@ -37,13 +45,14 @@ scan_stopped = False
 # --- Backend subprocess call for spectrograph (unchanged) ---
 def run(command, *args):
     cmd = [
-        r".venv313-32\Scripts\python.exe",
-        "controller\spectrograph_command.py",
+        r"C:/Users/Nanophotonics/AppData/Local/Programs/Python/Python310-32/python.exe",
+        r"C:/Users/Nanophotonics/Desktop/HyperSpectral/controller/spectrograph_command.py",
         command
     ] + list(map(str, args))
 
     startupinfo = None
     if IS_FROZEN:
+        # Prevent console window from flashing open
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
@@ -66,13 +75,13 @@ def run(command, *args):
     return output
 
 # =========================
-# Helpers: line-based IPC
+# Tiny line-based IPC helpers (for the two EXEs)
 # =========================
 
 class _LineProcess:
     """
     Minimal line-oriented subprocess wrapper (stdin/stdout).
-    Used for th260_helper.exe (x64) and stage_helper.exe (x64).
+    Used for th260_helper.exe and stage_helper.exe.
     """
     def __init__(self, exe_path):
         self.exe_path = exe_path
@@ -120,8 +129,8 @@ class _LineProcess:
 
 class TH260Client:
     """Wrapper for th260_helper.exe"""
-    def __init__(self, exe_path):
-        self.proc = _LineProcess(exe_path)
+    def __init__(self, exe):
+        self.proc = _LineProcess(exe)
 
     def init(self, binning=1, offset_ps=0, sync_div=1, sync_offset_ps=25000):
         self.proc.send(f"init {binning} {offset_ps} {sync_div} {sync_offset_ps}", timeout=20.0)
@@ -133,32 +142,42 @@ class TH260Client:
 
     def acquire(self, tacq_ms=1000):
         r = self.proc.send(f"acquire {tacq_ms}", timeout=max(10.0, tacq_ms/1000.0 + 5.0))
+        # r looks like: "OK HIST CH=<n> LEN=<bins> BYTES=<N>"
         meta = dict(kv.split("=") for kv in r[3:].split()[1:])
         ch, ln, nbytes = int(meta["CH"]), int(meta["LEN"]), int(meta["BYTES"])
         # Next line is base64 payload
-        b64 = self.proc._readline(timeout=10.0)
-        raw = subprocess.base64.b64decode(b64.encode("ascii")) if hasattr(subprocess, "base64") else __import__("base64").b64decode(b64.encode("ascii"))
+        b64 = self.proc._readline(timeout=20.0)
+        raw = base64.b64decode(b64.encode("ascii"))
         arr = np.frombuffer(raw, dtype=np.uint32)
         if arr.size != ch * ln:
-            raise RuntimeError("TH260 size mismatch")
+            raise RuntimeError(f"TH260 size mismatch: got {arr.size}, expected {ch*ln}")
         return arr.reshape((ch, ln))
 
     def close(self):
         self.proc.close()
 
 class StageClient:
-    """Wrapper for stage_helper.exe"""
-    def __init__(self, exe_path):
-        self.proc = _LineProcess(exe_path)
+    """Wrapper for stage_helper.exe (dynamic-loaded Kinesis, serials hardcoded in the EXE)"""
+    def __init__(self, exe):
+        self.proc = _LineProcess(exe)
 
-    def open(self, serial_x, serial_y, vmax_tenths=750):
-        self.proc.send(f"open {serial_x} {serial_y} {vmax_tenths}", timeout=10.0)
+    def open(self, serial_x=None, serial_y=None, vmax_tenths=750):
+        # If no serials given, the helper uses its hardcoded defaults
+        if serial_x and serial_y:
+            self.proc.send(f"open {serial_x} {serial_y} {vmax_tenths}")
+        else:
+            self.proc.send(f"open {vmax_tenths}")
 
     def move_ix(self, ix, iy, width, height):
         self.proc.send(f"move_ix {ix} {iy} {width} {height}")
 
     def setdac(self, vx_code, vy_code):
         self.proc.send(f"setdac {vx_code} {vy_code}")
+
+    def status(self):
+        r = self.proc.send("status")
+        # r: "OK X=<0|1> Y=<0|1>"
+        return dict(kv.split("=") for kv in r[3:].split())
 
     def disable(self):
         try:
@@ -369,54 +388,42 @@ class FlimFrame(ttk.Frame):
         cfg = ttk.LabelFrame(self, text="FLIM Config", padding=10)
         cfg.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
-        # Helper paths
-        ttk.Label(cfg, text="TH260 helper:").grid(row=0, column=0, sticky="e")
-        self.th_exe = ttk.Entry(cfg, width=50); self.th_exe.grid(row=0, column=1, padx=5, pady=2)
-        ttk.Label(cfg, text="Stage helper:").grid(row=1, column=0, sticky="e")
-        self.st_exe = ttk.Entry(cfg, width=50); self.st_exe.grid(row=1, column=1, padx=5, pady=2)
-
-        # Defaults (adjust these paths)
-        self.th_exe.insert(0, r"C:\path\to\th260_helper.exe")
-        self.st_exe.insert(0, r"C:\path\to\stage_helper.exe")
-
-        # Stage serials
-        ttk.Label(cfg, text="Stage X serial:").grid(row=2, column=0, sticky="e")
-        self.serial_x = ttk.Entry(cfg); self.serial_x.grid(row=2, column=1, padx=5, pady=2)
-        self.serial_x.insert(0, "29503259")
-        ttk.Label(cfg, text="Stage Y serial:").grid(row=3, column=0, sticky="e")
-        self.serial_y = ttk.Entry(cfg); self.serial_y.grid(row=3, column=1, padx=5, pady=2)
-        self.serial_y.insert(0, "29500307")
+        # Stage settings: only vmax now (serials are hardcoded in the helper)
+        ttk.Label(cfg, text="Stage Max V (tenths):").grid(row=0, column=0, sticky="e")
+        self.vmax_e = ttk.Entry(cfg); self.vmax_e.grid(row=0, column=1, padx=5, pady=2)
+        self.vmax_e.insert(0, "750")
 
         # Grid + wavelengths
-        ttk.Label(cfg, text="Width (px):").grid(row=4, column=0, sticky="e")
-        self.width_e = ttk.Entry(cfg); self.width_e.grid(row=4, column=1, padx=5, pady=2); self.width_e.insert(0, "5")
-        ttk.Label(cfg, text="Height (px):").grid(row=5, column=0, sticky="e")
-        self.height_e = ttk.Entry(cfg); self.height_e.grid(row=5, column=1, padx=5, pady=2); self.height_e.insert(0, "5")
+        ttk.Label(cfg, text="Width (px):").grid(row=1, column=0, sticky="e")
+        self.width_e = ttk.Entry(cfg); self.width_e.grid(row=1, column=1, padx=5, pady=2); self.width_e.insert(0, "5")
+        ttk.Label(cfg, text="Height (px):").grid(row=2, column=0, sticky="e")
+        self.height_e = ttk.Entry(cfg); self.height_e.grid(row=2, column=1, padx=5, pady=2); self.height_e.insert(0, "5")
 
-        ttk.Label(cfg, text="Wavelengths (nm, comma):").grid(row=6, column=0, sticky="e")
-        self.wls_e = ttk.Entry(cfg, width=50); self.wls_e.grid(row=6, column=1, padx=5, pady=2)
+        ttk.Label(cfg, text="Wavelengths (nm, comma):").grid(row=3, column=0, sticky="e")
+        self.wls_e = ttk.Entry(cfg, width=50); self.wls_e.grid(row=3, column=1, padx=5, pady=2)
         self.wls_e.insert(0, "500,510,520")
 
         # Timing
-        ttk.Label(cfg, text="Tacq (ms):").grid(row=7, column=0, sticky="e")
-        self.tacq_e = ttk.Entry(cfg); self.tacq_e.grid(row=7, column=1, padx=5, pady=2); self.tacq_e.insert(0, "1000")
-        ttk.Label(cfg, text="Stage settle (ms):").grid(row=8, column=0, sticky="e")
-        self.stage_settle_e = ttk.Entry(cfg); self.stage_settle_e.grid(row=8, column=1, padx=5, pady=2); self.stage_settle_e.insert(0, "100")
-        ttk.Label(cfg, text="Mono settle (ms):").grid(row=9, column=0, sticky="e")
-        self.mono_settle_e = ttk.Entry(cfg); self.mono_settle_e.grid(row=9, column=1, padx=5, pady=2); self.mono_settle_e.insert(0, "800")
+        ttk.Label(cfg, text="Tacq (ms):").grid(row=4, column=0, sticky="e")
+        self.tacq_e = ttk.Entry(cfg); self.tacq_e.grid(row=4, column=1, padx=5, pady=2); self.tacq_e.insert(0, "1000")
+        ttk.Label(cfg, text="Stage settle (ms):").grid(row=5, column=0, sticky="e")
+        self.stage_settle_e = ttk.Entry(cfg); self.stage_settle_e.grid(row=5, column=1, padx=5, pady=2); self.stage_settle_e.insert(0, "100")
+        ttk.Label(cfg, text="Mono settle (ms):").grid(row=6, column=0, sticky="e")
+        self.mono_settle_e = ttk.Entry(cfg); self.mono_settle_e.grid(row=6, column=1, padx=5, pady=2); self.mono_settle_e.insert(0, "800")
 
         # Save dir
-        ttk.Label(cfg, text="Output folder:").grid(row=10, column=0, sticky="e")
-        self.out_e = ttk.Entry(cfg, width=50); self.out_e.grid(row=10, column=1, padx=5, pady=2)
-        ttk.Button(cfg, text="Browse...", command=self.pick_outdir).grid(row=10, column=2, padx=5)
+        ttk.Label(cfg, text="Output folder:").grid(row=7, column=0, sticky="e")
+        self.out_e = ttk.Entry(cfg, width=50); self.out_e.grid(row=7, column=1, padx=5, pady=2)
+        ttk.Button(cfg, text="Browse...", command=self.pick_outdir).grid(row=7, column=2, padx=5)
 
         # Actions
         btns = ttk.Frame(cfg)
-        btns.grid(row=11, column=0, columnspan=3, pady=10)
+        btns.grid(row=8, column=0, columnspan=3, pady=10)
         ttk.Button(btns, text="Connect Helpers", command=self.connect_helpers).grid(row=0, column=0, padx=5)
         ttk.Button(btns, text="Disconnect", command=self.disconnect_helpers).grid(row=0, column=1, padx=5)
         ttk.Button(btns, text="Start FLIM Scan", command=self.start_scan).grid(row=0, column=2, padx=5)
         ttk.Button(btns, text="Stop", command=self.stop_scan).grid(row=0, column=3, padx=5)
+        ttk.Button(btns, text="Stage Status", command=self.show_status).grid(row=0, column=4, padx=5)
 
         # Status
         self.status = ttk.Label(self, text="Status: idle")
@@ -435,14 +442,17 @@ class FlimFrame(ttk.Frame):
     def connect_helpers(self):
         try:
             if self.th is None:
-                self.th = TH260Client(self.th_exe.get())
+                self.th = TH260Client(TH260_HELPER_PATH)
                 self.th.init(binning=1, offset_ps=0, sync_div=1, sync_offset_ps=25000)
                 res_ps, ch, hlen = self.th.info()
                 self.status.config(text=f"TH260 ready: {ch} ch, {hlen} bins, {res_ps:.1f} ps/bin")
             if self.stage is None:
-                self.stage = StageClient(self.st_exe.get())
-                self.stage.open(self.serial_x.get(), self.serial_y.get(), 750)
+                self.stage = StageClient(STAGE_HELPER_PATH)
+                vmax = int(self.vmax_e.get() or "750")
+                self.stage.open(vmax_tenths=vmax)  # uses hardcoded serials in helper
                 self.status.config(text=self.status.cget("text") + " | Stage ready")
+        except FileNotFoundError as e:
+            messagebox.showerror("Helper not found", f"Check helper path:\n{e}")
         except Exception as e:
             messagebox.showerror("Connect error", str(e))
 
@@ -478,6 +488,13 @@ class FlimFrame(ttk.Frame):
     def stop_scan(self):
         self.scan_stop.set()
         self.status.config(text="Status: stopping...")
+
+    def show_status(self):
+        try:
+            s = self.stage.status()
+            messagebox.showinfo("Stage Status", f"X connected: {s.get('X')}\nY connected: {s.get('Y')}")
+        except Exception as e:
+            messagebox.showerror("Stage Status", str(e))
 
     def _scan_thread(self, outdir):
         try:
@@ -574,8 +591,8 @@ def show_page(which):
 # Menubar
 menubar = tk.Menu(root)
 mode_menu = tk.Menu(menubar, tearoff=0)
-mode_menu.add_command(label="Spectrograph Only", command=lambda: show_page("spectro"))
-mode_menu.add_command(label="FLIM (Stage + Mono + TH260)", command=lambda: show_page("flim"))
+mode_menu.add_command(label="HyperSpectral", command=lambda: show_page("spectro"))
+mode_menu.add_command(label="SpectralFLIM", command=lambda: show_page("flim"))
 menubar.add_cascade(label="Mode", menu=mode_menu)
 root.config(menu=menubar)
 
